@@ -2,7 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
-html { background: #0a0a0f; }
-body { background: #0a0a0f; @apply text-white antialiased; }
+:root {
+  color-scheme: dark;
+}
 
-::selection { background: rgba(99, 102, 241, 0.35); color: white; }
+html {
+  background-color: #09090b;
+}
+
+body {
+  background-color: #09090b;
+  color: #f4f4f5;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: #27272a;
+  color: #ffffff;
+}
+
+/* Minimalist scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}

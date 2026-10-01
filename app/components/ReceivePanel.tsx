@@ -1,182 +1,411 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import {
+  Download,
+  CheckCircle2,
+  File as FileIcon,
+  RefreshCw,
+} from "lucide-react";
 
 import ProgressBar from "@/app/components/ProgressBar";
 import { ConnectionState, PeerSession } from "@/lib/peer";
-import { FileEndMessage, FileHeader, assembleFile, downloadBlob } from "@/lib/transfer";
+import {
+  assembleFile,
+  downloadBlob,
+  formatBytes,
+  formatEta,
+  formatSpeed,
+  ControlMessage,
+  FileStartMessage,
+  FileEndMessage,
+} from "@/lib/transfer";
+import { SecurityFingerprint, computeSha256 } from "@/lib/crypto";
 
-type ReceiveProgress = { receivedBytes: number; totalBytes: number; speedMbps: number; etaSeconds: number | null; completed: boolean };
+type FileDownloadProgress = {
+  name: string;
+  size: number;
+  mime: string;
+  receivedBytes: number;
+  speed: number;
+  eta: number | null;
+  completed: boolean;
+  checksumMatched: boolean | null;
+  blob?: Blob;
+};
 
 type ReceivePanelProps = {
   initialRoomCode?: string | null;
-  onStateChange: (state: { connectionState: ConnectionState; statusMessage: string; encrypted: boolean }) => void;
+  sessionRef: React.MutableRefObject<PeerSession | null>;
+  onStateUpdate: (state: {
+    connectionState: ConnectionState;
+    statusMessage: string;
+    encrypted: boolean;
+    fingerprint: SecurityFingerprint | null;
+    latencyMs: number | null;
+  }) => void;
+  onOpenSecurity: () => void;
+  onTextMessage?: (msg: import("@/lib/transfer").SecureTextMessage) => void;
 };
 
-type IncomingFile = { header: FileHeader; chunks: ArrayBuffer[]; receivedBytes: number; startedAt: number };
-
-function formatEta(seconds: number | null) {
-  if (seconds === null || !Number.isFinite(seconds)) return "—";
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-}
-
-export default function ReceivePanel({ initialRoomCode, onStateChange }: ReceivePanelProps) {
-  const [roomCode, setRoomCode] = useState(initialRoomCode ?? "");
+export default function ReceivePanel({
+  initialRoomCode,
+  sessionRef,
+  onStateUpdate,
+  onOpenSecurity,
+  onTextMessage,
+}: ReceivePanelProps) {
   const [inputCode, setInputCode] = useState(initialRoomCode ?? "");
+  const [passphrase, setPassphrase] = useState("");
+  const [showPassphrase, setShowPassphrase] = useState(false);
+  const [activeRoom, setActiveRoom] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
-  const [progressMap, setProgressMap] = useState<Record<string, ReceiveProgress>>({});
-  const [completeFiles, setCompleteFiles] = useState<string[]>([]);
+  const [filesMap, setFilesMap] = useState<Record<string, FileDownloadProgress>>({});
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const sessionRef = useRef<PeerSession | null>(null);
-  const incomingFileRef = useRef<IncomingFile | null>(null);
+
+  const activeFileRef = useRef<{
+    meta: FileStartMessage["file"];
+    chunks: ArrayBuffer[];
+    receivedBytes: number;
+    startedAt: number;
+  } | null>(null);
 
   useEffect(() => {
-    onStateChange({ connectionState: roomCode ? "connecting" : "idle", statusMessage: roomCode ? "Ready to connect." : "Enter room code.", encrypted: false });
-  }, [onStateChange, roomCode]);
-
-  useEffect(() => {
-    return () => sessionRef.current?.destroy();
-  }, []);
-
-  useEffect(() => {
-    if (initialRoomCode) void joinRoom(initialRoomCode);
+    if (initialRoomCode) {
+      setInputCode(initialRoomCode.toUpperCase());
+      void joinRoom(initialRoomCode.toUpperCase());
+    } else {
+      onStateUpdate({
+        connectionState: "idle",
+        statusMessage: "Enter room code.",
+        encrypted: false,
+        fingerprint: null,
+        latencyMs: null,
+      });
+    }
   }, [initialRoomCode]);
 
-  const updateSharedState = (connectionState: ConnectionState, statusMessage: string, encrypted: boolean) => {
-    onStateChange({ connectionState, statusMessage, encrypted });
-  };
-
-  const setupSession = () => {
-    sessionRef.current?.destroy();
-    const session = new PeerSession("receiver", {
-      onStateChange: (state) => updateSharedState(state, "Connecting…", session.isSecure()),
-      onStatus: (message) => updateSharedState(session.isSecure() ? "encrypted" : "connecting", message, session.isSecure()),
-      onEncryptedChange: (encrypted) => updateSharedState(encrypted ? "encrypted" : "connected", encrypted ? "Secure." : "Securing…", encrypted),
-      onError: (message) => { setIsJoining(false); setErrorMessage(message); updateSharedState("error", message, false); },
-      onOpen: () => { setIsJoining(false); setErrorMessage(null); updateSharedState("connected", "Connected. Waiting…", false); },
-      onTransport: (payload) => { if (payload.kind === "json") void handleControlMessage(payload.text); else void handleChunk(payload.buffer); },
-    });
-    sessionRef.current = session;
-    return session;
-  };
-
-  const joinRoom = async (code: string) => {
-    const normalized = code.trim().toUpperCase();
-    if (!normalized) return;
-    setRoomCode(normalized);
-    setInputCode(normalized);
-    setIsJoining(true);
-    setErrorMessage(null);
-    setCompleteFiles([]);
-    incomingFileRef.current = null;
-    setProgressMap({});
-    const session = setupSession();
-    await session.createReceiver(normalized);
-    updateSharedState("waiting", "Waiting for sender…", false);
-  };
-
-  const handleControlMessage = async (text: string) => {
-    const message = JSON.parse(text) as FileHeader | FileEndMessage;
-    if (message.type === "file-start") {
-      incomingFileRef.current = { header: message, chunks: [], receivedBytes: 0, startedAt: performance.now() };
-      setProgressMap((current) => ({ ...current, [message.name]: { receivedBytes: 0, totalBytes: message.size, speedMbps: 0, etaSeconds: null, completed: false } }));
-      updateSharedState("transferring", `Receiving ${message.name}…`, true);
+  const handleControlMessage = async (msg: ControlMessage) => {
+    if (msg.type === "secure-text") {
+      onTextMessage?.(msg);
       return;
     }
-    if (message.type === "file-end" && incomingFileRef.current) {
-      const currentFile = incomingFileRef.current;
-      const blob = assembleFile(currentFile.chunks, currentFile.header.mime);
-      downloadBlob(blob, currentFile.header.name);
-      setCompleteFiles((current) => [...current, currentFile.header.name]);
-      setProgressMap((current) => ({ ...current, [currentFile.header.name]: { ...current[currentFile.header.name], completed: true, receivedBytes: currentFile.header.size, totalBytes: currentFile.header.size, etaSeconds: 0 } }));
-      updateSharedState("completed", `${currentFile.header.name} downloaded.`, true);
-      incomingFileRef.current = null;
+
+    if (msg.type === "file-start") {
+      activeFileRef.current = {
+        meta: msg.file,
+        chunks: [],
+        receivedBytes: 0,
+        startedAt: performance.now(),
+      };
+
+      setFilesMap((prev) => ({
+        ...prev,
+        [msg.file.id]: {
+          name: msg.file.name,
+          size: msg.file.size,
+          mime: msg.file.mime,
+          receivedBytes: 0,
+          speed: 0,
+          eta: null,
+          completed: false,
+          checksumMatched: null,
+        },
+      }));
+
+      onStateUpdate({
+        connectionState: "transferring",
+        statusMessage: `Receiving ${msg.file.name}…`,
+        encrypted: true,
+        fingerprint: sessionRef.current?.getFingerprint() ?? null,
+        latencyMs: null,
+      });
+      return;
+    }
+
+    if (msg.type === "file-end") {
+      const active = activeFileRef.current;
+      if (!active || active.meta.id !== msg.id) return;
+
+      const blob = assembleFile(active.chunks, active.meta.mime);
+
+      let checksumMatched: boolean | null = null;
+      if (msg.checksum) {
+        try {
+          const computedHash = await computeSha256(blob);
+          checksumMatched = computedHash === msg.checksum;
+        } catch {
+          checksumMatched = null;
+        }
+      }
+
+      downloadBlob(blob, active.meta.name);
+
+      setFilesMap((prev) => ({
+        ...prev,
+        [active.meta.id]: {
+          ...prev[active.meta.id],
+          completed: true,
+          receivedBytes: active.meta.size,
+          speed: 0,
+          eta: 0,
+          checksumMatched,
+          blob,
+        },
+      }));
+
+      onStateUpdate({
+        connectionState: "completed",
+        statusMessage: `${active.meta.name} received.`,
+        encrypted: true,
+        fingerprint: sessionRef.current?.getFingerprint() ?? null,
+        latencyMs: null,
+      });
+
+      activeFileRef.current = null;
+    }
+
+    if (msg.type === "file-cancel") {
+      setErrorMessage(`Transfer cancelled: ${msg.reason || "sender disconnected"}`);
+      activeFileRef.current = null;
     }
   };
 
-  const handleChunk = async (buffer: ArrayBuffer) => {
-    const currentFile = incomingFileRef.current;
-    if (!currentFile) return;
-    currentFile.chunks.push(buffer);
-    currentFile.receivedBytes += buffer.byteLength;
-    const elapsedSeconds = Math.max((performance.now() - currentFile.startedAt) / 1000, 0.001);
-    const speed = currentFile.receivedBytes / elapsedSeconds / (1024 * 1024);
-    const remaining = currentFile.header.size - currentFile.receivedBytes;
-    const etaSeconds = speed > 0 ? remaining / (speed * 1024 * 1024) : null;
-    setProgressMap((current) => ({ ...current, [currentFile.header.name]: { receivedBytes: currentFile.receivedBytes, totalBytes: currentFile.header.size, speedMbps: speed, etaSeconds, completed: false } }));
+  const handleBinaryChunk = (buffer: ArrayBuffer) => {
+    const active = activeFileRef.current;
+    if (!active) return;
+
+    active.chunks.push(buffer);
+    active.receivedBytes += buffer.byteLength;
+
+    const elapsedSec = Math.max((performance.now() - active.startedAt) / 1000, 0.001);
+    const speed = active.receivedBytes / elapsedSec;
+    const remaining = active.meta.size - active.receivedBytes;
+    const eta = speed > 0 ? remaining / speed : null;
+
+    setFilesMap((prev) => ({
+      ...prev,
+      [active.meta.id]: {
+        ...prev[active.meta.id],
+        receivedBytes: active.receivedBytes,
+        speed,
+        eta,
+      },
+    }));
+  };
+
+  const joinRoom = async (codeToJoin?: string) => {
+    const code = (codeToJoin || inputCode).trim().toUpperCase();
+    if (code.length < 5) return;
+
+    setIsJoining(true);
+    setErrorMessage(null);
+    setActiveRoom(code);
+
+    sessionRef.current?.destroy();
+
+    const session = new PeerSession(
+      "receiver",
+      {
+        onStateChange: (state) => {
+          onStateUpdate({
+            connectionState: state,
+            statusMessage: state,
+            encrypted: session.isSecure(),
+            fingerprint: session.getFingerprint(),
+            latencyMs: null,
+          });
+        },
+        onStatus: (msg) => {
+          onStateUpdate({
+            connectionState: session.isSecure() ? "encrypted" : "connecting",
+            statusMessage: msg,
+            encrypted: session.isSecure(),
+            fingerprint: session.getFingerprint(),
+            latencyMs: null,
+          });
+        },
+        onEncryptedChange: (isEncrypted) => {
+          setIsJoining(false);
+          onStateUpdate({
+            connectionState: isEncrypted ? "encrypted" : "connecting",
+            statusMessage: isEncrypted ? "Connected to room." : "Securing…",
+            encrypted: isEncrypted,
+            fingerprint: session.getFingerprint(),
+            latencyMs: null,
+          });
+        },
+        onSecurityVerified: (fp) => {
+          onStateUpdate({
+            connectionState: "encrypted",
+            statusMessage: "Connected.",
+            encrypted: true,
+            fingerprint: fp,
+            latencyMs: null,
+          });
+        },
+        onLatency: (lat) => {
+          onStateUpdate({
+            connectionState: "encrypted",
+            statusMessage: "Connected",
+            encrypted: true,
+            fingerprint: session.getFingerprint(),
+            latencyMs: lat,
+          });
+        },
+        onControlMessage: (msg) => {
+          void handleControlMessage(msg);
+        },
+        onBinaryChunk: (buf) => {
+          handleBinaryChunk(buf);
+        },
+        onError: (err) => {
+          setIsJoining(false);
+          setErrorMessage(err);
+        },
+        onClose: () => {
+          setIsJoining(false);
+        },
+      },
+      showPassphrase && passphrase.trim().length > 0 ? passphrase.trim() : undefined,
+    );
+
+    sessionRef.current = session;
+    await session.createReceiver(code);
   };
 
   return (
-    <div className="rounded-xl border border-white/10 bg-gray-900/50 p-6">
-      <h2 className="mb-4 inline-flex items-center gap-2 text-lg font-medium text-white">
-        <svg className="h-5 w-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-        </svg>
-        Receive files
-      </h2>
+    <div className="space-y-4">
+      {/* Join form */}
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-3">
+        <label className="text-xs text-zinc-400 block">
+          Enter 6-character room code:
+        </label>
 
-      <form onSubmit={(e) => { e.preventDefault(); void joinRoom(inputCode); }} className="flex gap-2">
-        <input
-          value={inputCode}
-          onChange={(e) => setInputCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))}
-          placeholder="ABC123"
-          className="flex-1 rounded-lg border border-white/10 bg-black/30 px-4 py-3 font-mono text-lg tracking-widest text-white placeholder:text-gray-600 focus:border-sky-500 focus:outline-none"
-        />
-        <button type="submit" disabled={inputCode.length !== 6 || isJoining} className="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-6 py-3 text-sm font-medium text-white transition hover:bg-sky-600 disabled:opacity-50">
-          {isJoining ? (
-            <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-          ) : (
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
-            </svg>
-          )}
-          Join
-        </button>
-      </form>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void joinRoom();
+          }}
+          className="space-y-2"
+        >
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={inputCode}
+              maxLength={6}
+              onChange={(e) =>
+                setInputCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))
+              }
+              placeholder="CODE"
+              className="flex-1 rounded border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-base font-bold tracking-widest text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={inputCode.length < 5 || isJoining}
+              className="rounded bg-zinc-100 px-4 py-2 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-40 transition"
+            >
+              {isJoining ? "Joining…" : "Connect"}
+            </button>
+          </div>
 
-      {errorMessage && <p className="mt-3 text-sm text-red-400">{errorMessage}</p>}
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowPassphrase(!showPassphrase)}
+              className="text-[11px] text-zinc-500 hover:text-zinc-400 transition"
+            >
+              {showPassphrase ? "Hide password field" : "Has optional password?"}
+            </button>
 
-      <div className="mt-4 space-y-2">
-        {Object.entries(progressMap).map(([fileName, progress]) => {
-          const percent = (progress.receivedBytes / Math.max(progress.totalBytes, 1)) * 100;
-          const isComplete = completeFiles.includes(fileName);
-          return (
-            <div key={fileName} className="rounded-lg border border-white/5 bg-black/30 p-3">
-              <div className="flex items-center gap-3">
-                <svg className={`h-5 w-5 shrink-0 ${isComplete ? "text-emerald-400" : "text-sky-400"}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                  {isComplete ? (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  ) : (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  )}
-                </svg>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm text-white">{fileName}</p>
-                  {!isComplete && (
-                    <p className="text-xs text-sky-400">{progress.speedMbps.toFixed(1)} MB/s · {formatEta(progress.etaSeconds)}</p>
+            {showPassphrase && (
+              <input
+                type="password"
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                placeholder="Room password..."
+                className="mt-1 w-full rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none"
+              />
+            )}
+          </div>
+        </form>
+      </div>
+
+      {errorMessage && (
+        <div className="rounded border border-red-900/40 bg-red-950/20 p-2.5 text-xs text-red-400 font-mono">
+          {errorMessage}
+        </div>
+      )}
+
+      {/* Files list */}
+      {Object.keys(filesMap).length > 0 ? (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3.5 space-y-2">
+          <div className="text-xs text-zinc-400 pb-2 border-b border-zinc-900">
+            Received files
+          </div>
+
+          <div className="space-y-1.5">
+            {Object.entries(filesMap).map(([id, file]) => {
+              const pct = Math.min(
+                100,
+                (file.receivedBytes / Math.max(file.size, 1)) * 100,
+              );
+
+              return (
+                <div
+                  key={id}
+                  className="rounded border border-zinc-900 bg-zinc-900/40 p-2 text-xs space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileIcon className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                      <span className="truncate text-zinc-200">{file.name}</span>
+                      <span className="text-zinc-500 font-mono text-[11px]">
+                        {formatBytes(file.size)}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {file.completed ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-emerald-500 text-[11px] font-mono flex items-center gap-1">
+                            <CheckCircle2 className="h-3 w-3" /> verified
+                          </span>
+                          {file.blob && (
+                            <button
+                              type="button"
+                              onClick={() => downloadBlob(file.blob!, file.name)}
+                              className="text-zinc-400 hover:text-zinc-200 text-[11px] underline"
+                            >
+                              save
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="font-mono text-[11px] text-zinc-400">
+                          {pct.toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {!file.completed && (
+                    <ProgressBar
+                      value={pct}
+                      speed={file.speed > 0 ? formatSpeed(file.speed) : undefined}
+                      eta={file.eta !== null ? formatEta(file.eta) : undefined}
+                    />
                   )}
                 </div>
-                {isComplete && <span className="text-xs text-emerald-400">Done</span>}
-              </div>
-              {!isComplete && <ProgressBar value={percent} sublabel={`${percent.toFixed(0)}%`} />}
-            </div>
-          );
-        })}
-        {Object.keys(progressMap).length === 0 && (
-          <div className="py-8 text-center">
-            <svg className="mx-auto h-10 w-10 text-gray-600 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-            </svg>
-            <p className="text-sm text-gray-500">
-              {roomCode ? `Waiting in room ${roomCode}…` : "Enter a room code above"}
-            </p>
+              );
+            })}
           </div>
-        )}
-      </div>
+        </div>
+      ) : activeRoom ? (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 text-xs text-zinc-500 font-mono text-center">
+          Connected to room {activeRoom}. Waiting for sender to transmit files…
+        </div>
+      ) : null}
     </div>
   );
 }

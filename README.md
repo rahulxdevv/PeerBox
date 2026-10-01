@@ -1,137 +1,101 @@
-# PeerBox
+# PeerBox v2.0
 
-Encrypted peer-to-peer file transfer in your browser.
+> Encrypted, zero-knowledge peer-to-peer file transfer and confidential clipboard sync in your browser.
 
-<img width="1364" height="767" alt="image" src="https://github.com/user-attachments/assets/d3589dfa-1c72-4962-a674-839658b5a09a" />
+Direct browser-to-browser transfers secured with ephemeral ECDH P-256 key exchange, military-grade AES-256-GCM authenticated cipher, and streaming SHA-256 checksums. No cloud storage, no tracking, and zero intermediaries.
 
-## Features
+---
 
-- End-to-end encrypted file transfers
-- Direct browser-to-browser connection (no server storage)
-- No accounts or uploads required
-- QR code room sharing
-- Supports large files via streaming
+## ⚡ Highlights & Advanced Features
 
-## Tech Stack
+- 🔐 **Zero-Knowledge End-to-End Encryption** — Ephemeral ECDH (P-256 curve) key agreement generated in-browser via Web Crypto API. Private keys never leave device memory.
+- 🛡️ **SAS Safety Verification (MITM Prevention)** — 4 visual shield emojis and 6-digit verification code to ensure zero tampering on the signaling layer.
+- 🚀 **WebRTC Backpressure Streaming** — High-throughput chunk streaming with dynamic `bufferedAmount` monitoring to transfer gigabyte-sized files without buffer overflow.
+- 🔍 **SHA-256 Integrity Check** — Real-time cryptographic hashing verifies byte-for-byte correctness upon receipt.
+- 🔑 **Room Passphrase / PIN Protection** — Optional secret passphrase combined with ECDH shared bits to lock rooms against unauthorized access.
+- 📝 **Encrypted Secret Notes & Clipboard Sync** — Instant direct P2P transfer of credentials, API tokens, passwords, and text snippets.
+- ✨ **Clean, Minimalist Interface** — Refined dark UI with responsive controls and zero unnecessary bloat.
 
-- Next.js 14
-- PeerJS (WebRTC signaling)
-- WebRTC Data Channels
-- ECDH + AES-GCM encryption
-- Tailwind CSS
+---
 
-## Quick Start
+## 🛠️ Architecture & Cryptography
 
+```
+Sender Browser                              Receiver Browser
+┌────────────────────────┐                  ┌────────────────────────┐
+│  Generate ECDH P-256   │                  │  Generate ECDH P-256   │
+│  (Private / Public Key)│                  │  (Private / Public Key)│
+└──────────┬─────────────┘                  └───────────┬────────────┘
+           │                                            │
+           │  1. Exchange Public Keys via WebRTC        │
+           ├───────────────────────────────────────────►│
+           │◄───────────────────────────────────────────┤
+           │                                            │
+           ▼                                            ▼
+┌────────────────────────┐                  ┌────────────────────────┐
+│  Derive Shared Bits    │                  │  Derive Shared Bits    │
+│  + Deterministic Salt  │                  │  + Deterministic Salt  │
+│  + Optional PIN / Salt │                  │  + Optional PIN / Salt │
+│  ─────────────         │                  │  ─────────────         │
+│  HKDF SHA-256          │                  │  HKDF SHA-256          │
+│  ==> AES-256-GCM Key   │                  │  ==> AES-256-GCM Key   │
+│  ==> 4-Emoji SAS Code  │                  │  ==> 4-Emoji SAS Code  │
+└──────────┬─────────────┘                  └───────────┬────────────┘
+           │                                            │
+           │  2. Direct WebRTC DataChannel (Encrypted)  │
+           │===========================================>│
+           │  (AES-GCM chunks + IV + SHA-256 checksum)  │
+```
+
+---
+
+## 📊 Comparison: PeerBox vs Traditional File Transfer
+
+| Feature | PeerBox v2.0 | Traditional Cloud / Wetransfer |
+| :--- | :--- | :--- |
+| **Server Storage** | ❌ None (0 bytes on server) | ⚠️ Files uploaded to third-party server |
+| **Encryption** | 🔒 ECDH P-256 + AES-256-GCM | ❌ Server can read unencrypted files |
+| **MITM Protection** | 🛡️ SAS Visual Emoji & 6-digit Code | ❌ None |
+| **Integrity Check** | 🔍 SHA-256 verified per file | ⚠️ Often unverified |
+| **Secret Notes / Text**| 📝 Direct E2EE sync | ❌ Not available |
+| **Room PIN / Passcode**| 🔑 Optional zero-knowledge lock | ❌ Account login usually required |
+| **Transfer Speed** | ⚡ Direct peer speed (LAN / P2P) | 🐢 Bottlenecked by cloud upload/download |
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install dependencies
 ```bash
 npm install
+```
+
+### 2. Run local development server
+```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000)
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-## How It Works
-
-1. **Send** — Select files, get a room code or QR
-2. **Receive** — Enter code or scan QR on another device
-3. **Done** — Files stream directly, encrypted end-to-end
-
-## Features
-
-| Feature | PeerBox | Traditional |
-|---------|---------|------------|
-| Server for transfer | ❌ None | ✅ Required |
-| End-to-end encryption | ✅ ECDH + AES-GCM | ❌ Usually none |
-| File storage | ❌ Never stored | ✅ Server storage |
-| Download limits | ✅ Unlimited | ❌ 1-time usually |
-| Expiration | ✅ Ephemeral | ❌ Time-based only |
-| File size | ✅ Unlimited* | ❌ Server limited |
-| Privacy | ✅ 100% private | ❌ Server sees all |
-
-*Browser memory is the only limit. Files stream in chunks.
-
-## Tech Stack
-
-- **Next.js 14** — Framework
-- **PeerJS** — WebRTC signaling
-- **WebRTC Data Channels** — Direct P2P transport
-- **ECDH + AES-GCM** — End-to-end encryption
-- **Tailwind CSS** — Styling
-
-## Comparison: PeerBox vs Server-Based Solutions
-
-### Traditional Server
-
-```javascript
-// Files go through server — server sees everything
-app.post('/upload', upload.single('file'), (req, res) => {
-    // File stored on server
-    filesStore.set(fileId, fileData);
-});
+### 3. Build for production (Static Export)
+```bash
+npm run build
+npm start
 ```
 
-**Problems:**
-- Files stored on server (security risk)
-- Server sees unencrypted file content
-- Single download only (ephemeral but limited)
-- 50MB file limit
-- Needs always-on server hosting
-- Server costs money
-- Single point of failure
-- Server can go down
+---
 
-### PeerBox
+## ⚙️ Environment Variables (Optional)
 
-```javascript
-// Files stream directly — server never sees content
-for await (const chunk of streamFileChunks(file)) {
-    await session.sendBinary(chunk); // Encrypted before send
-}
-```
+| Variable | Description |
+| :--- | :--- |
+| `NEXT_PUBLIC_TURN_URL` | Optional custom TURN server for strict enterprise NAT traversal |
+| `NEXT_PUBLIC_TURN_USERNAME` | TURN username |
+| `NEXT_PUBLIC_TURN_CREDENTIAL` | TURN credential |
 
-**Advantages:**
-- No server in transfer path
-- Files never stored anywhere
-- End-to-end encrypted (server can't read)
-- Unlimited downloads
-- No file size server limit
-- No server hosting costs
-- No server maintenance
-- Works offline (same network)
+---
 
-## Architecture
+## 📄 License
 
-```
-Traditional (Server-Based):
-┌─────────┐     ┌─────────┐     ┌─────────┐
-│ Sender  │ ──► │ Server  │ ──► │Receiver │
-└─────────┘     └─────────┘     └─────────┘
-                 ▲ ▲ ▲
-                 │ │ │
-            Sees files, metadata, IPs
+MIT License. Designed and maintained by [rahulxdevv](https://github.com/rahulxdevv).
 
-PeerBox (P2P):
-┌─────────┐     ┌─────────┐     ┌─────────┐
-│ Sender  │ ◄── │ PeerJS  │──► │Receiver │
-└─────────┘     │ (signal)│     └─────────┘
-                └─────────┘
-                     │
-              Signal only, no file data
-```
-
-## Security
-
-- **ECDH key exchange** — Both parties generate key pairs, exchange public keys
-- **AES-GCM encryption** — All file chunks encrypted before transmission
-- **No key storage** — Keys are ephemeral, generated per session
-- **No server access** — Transfer happens directly between browsers
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NEXT_PUBLIC_PEERJS_KEY` | Cloud server | PeerJS API key for signaling |
-| `NEXT_PUBLIC_TURN_URL` | — | TURN server for NAT traversal |
-
-## License
-
-MIT

@@ -1,7 +1,13 @@
 {
   "name": "peerbox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "author": "rahulxdevv",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rahulxdevv/PeerBox.git"
+  },
+  "homepage": "https://github.com/rahulxdevv/PeerBox#readme",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -9,6 +15,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "lucide-react": "^1.49.0",
     "next": "14.2.30",
     "peerjs": "1.5.4",
     "qrcode.react": "4.2.0",

@@ -5,18 +5,16 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        base: "#0a0a0f",
-        panel: "#13131a",
+        background: "#09090b",
+        surface: {
+          DEFAULT: "#111114",
+          subtle: "#18181b",
+          border: "#27272a",
+        },
       },
       fontFamily: {
-        sans: ["var(--font-inter)", "system-ui", "sans-serif"],
-        mono: ["var(--font-jetbrains)", "monospace"],
-      },
-      boxShadow: {
-        panel: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
-      },
-      animation: {
-        "pulse-soft": "pulse 1.8s ease-in-out infinite",
+        sans: ["var(--font-inter)", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+        mono: ["var(--font-jetbrains)", "ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "monospace"],
       },
     },
   },
